@@ -14,10 +14,9 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 CHECK_INTERVAL = 60  # seconds
 
-# List.am URLs (apartments + houses, long-term rent)
+# List.am URLs (apartments only для теста)
 URLS = [
     "https://www.list.am/en/category/56",  # apartments
-    "https://www.list.am/en/category/57",  # houses
 ]
 
 # Filters
@@ -28,7 +27,7 @@ ALLOWED_DISTRICTS = [
     "Arabkir",
     "Kanaker-Zeytun",
     "Ajapnyak",
-    "Nor Nork",  # Добавлен для теста
+    "Nor Nork",
 ]
 
 SEEN_FILE = "seen_ads.json"
@@ -45,13 +44,13 @@ def save_seen(seen):
         json.dump(list(seen), f, ensure_ascii=False, indent=2)
 
 def parse_price(text):
-    text = text.replace("֏", "").replace(",", "").strip()
-    digits = "".join(ch for ch in text if ch.isdigit())
-    
-    if not digits:
+    # Обработка разных валют
+    text = text.replace("֏", "").replace("$", "").replace("€", "").replace(",", "").strip()
+    # Берем только первое число, если их несколько
+    match = re.search(r'\d+', text)
+    if not match:
         return None
-    
-    return int(digits)
+    return int(match.group())
 
 def extract_date(ad_element):
     """Пытается найти дату объявления"""
@@ -59,10 +58,10 @@ def extract_date(ad_element):
         date_elements = ad_element.select(".date, .time, .data, .date-time")
         
         for el in date_elements:
-            date_text = el.get_text(" ", strip=True)
-            if "сегодня" in date_text.lower() or "today" in date_text.lower():
+            date_text = el.get_text(" ", strip=True).lower()
+            if "сегодня" in date_text or "today" in date_text:
                 return datetime.now().date()
-            if "вчера" in date_text.lower() or "yesterday" in date_text.lower():
+            if "вчера" in date_text or "yesterday" in date_text:
                 return datetime.now().date() - timedelta(days=1)
             
             date_match = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', date_text)
@@ -70,23 +69,23 @@ def extract_date(ad_element):
                 day, month, year = date_match.groups()
                 return datetime(int(year), int(month), int(day)).date()
         
-        return datetime.now().date()
+        return None  # Не можем определить дату
     except:
-        return datetime.now().date()
+        return None
 
 def is_recent(ad_element):
     """Проверяет, добавлено ли объявление сегодня или вчера"""
-    try:
-        ad_date = extract_date(ad_element)
-        today = datetime.now().date()
-        yesterday = today - timedelta(days=1)
-        
-        return ad_date == today or ad_date == yesterday
-    except:
-        return False
+    ad_date = extract_date(ad_element)
+    if ad_date is None:
+        # Если дату определить не можем - считаем новым (не фильтруем)
+        return True
+    
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    return ad_date == today or ad_date == yesterday
 
 def matches_filters(title, description, price_text):
-    """Проверяет цену и район (без проверки на животных)"""
+    """Проверяет цену и район"""
     full_text = f"{title} {description}".lower()
     
     price = parse_price(price_text)
@@ -101,7 +100,7 @@ def matches_filters(title, description, price_text):
     if not any(d.lower() in full_text for d in ALLOWED_DISTRICTS):
         return False
     
-    # Исключаем агенства (опционально, можно закомментировать)
+    # Исключаем агенства
     if "agency" in full_text:
         return False
     
@@ -111,9 +110,7 @@ def clean_text(text):
     """Очищает текст от проблемных символов"""
     if not text:
         return ""
-    # Убираем лишние пробелы и переносы строк
     text = text.replace('\n', ' ').replace('\r', ' ').strip()
-    # Убираем множественные пробелы
     text = ' '.join(text.split())
     return text
 
@@ -122,10 +119,8 @@ def scrape_ads():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
         "DNT": "1",
         "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
     }
     
     ads = []
@@ -133,7 +128,7 @@ def scrape_ads():
     for url in URLS:
         try:
             print(f"Проверяю: {url}")
-            time.sleep(2)  # Задержка между запросами
+            time.sleep(2)
             
             response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
@@ -141,7 +136,6 @@ def scrape_ads():
             soup = BeautifulSoup(response.text, "html.parser")
             items = soup.select("div.dl")
             
-            # Альтернативный селектор, если div.dl не найден
             if not items:
                 items = soup.select("div[data-id]")
             
@@ -157,18 +151,21 @@ def scrape_ads():
                         continue
                     
                     title = clean_text(title_el.get_text(" ", strip=True))
-                    link = "https://www.list.am" + title_el.get("href")
+                    href = title_el.get("href", "")
+                    if href.startswith("/"):
+                        link = "https://www.list.am" + href
+                    else:
+                        link = href
+                    
                     price = clean_text(price_el.get_text(" ", strip=True))
                     
                     description = ""
                     if desc_el:
                         description = clean_text(desc_el.get_text(" ", strip=True))
                     
-                    # Фильтрация
                     if not matches_filters(title, description, price):
                         continue
                     
-                    # Проверка даты (только сегодня/вчера)
                     if not is_recent(item):
                         continue
                     
@@ -176,7 +173,6 @@ def scrape_ads():
                         "id": link,
                         "title": title,
                         "price": price,
-                        "description": description,
                         "link": link,
                     })
                     print(f"НАЙДЕНО: {title} - {price}")
@@ -186,71 +182,62 @@ def scrape_ads():
                     
         except requests.exceptions.RequestException as e:
             print(f"Ошибка при запросе {url}: {e}")
-            if "403" in str(e):
-                print("Ошибка 403 - доступ запрещен. Возможно, IP заблокирован.")
         except Exception as e:
-            print(f"Общая ошибка при обработке {url}: {e}")
+            print(f"Общая ошибка: {e}")
     
     return ads
 
 async def send_message(bot, ad):
-    """Отправляет сообщение о новом объявлении (упрощенная версия)"""
-    # Упрощаем текст, убираем все возможные спецсимволы
-    title = ad['title'][:100]  # Ограничиваем длину
+    """Отправляет сообщение о новом объявлении"""
+    # Максимально простой формат без лишних символов
+    title = ad['title'][:150]
     price = ad['price']
     link = ad['link']
     
-    text = f"НОВОЕ ОБЪЯВЛЕНИЕ\n\n{title}\nЦена: {price}\n\n{link}"
+    text = f"NEW LISTING\n\n{title}\nPrice: {price}\n\n{link}"
     
     try:
         await bot.send_message(chat_id=CHAT_ID, text=text)
-        print(f"Сообщение отправлено: {title}")
+        print(f"SENT: {title[:50]}")
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
-
-async def send_test_message(bot):
-    """Отправляет тестовое сообщение при запуске"""
-    text = f"БОТ ЗАПУЩЕН\n\nЦена: {MIN_PRICE} - {MAX_PRICE} AMD\nРайоны: {', '.join(ALLOWED_DISTRICTS)}\nПроверка каждые {CHECK_INTERVAL} секунд"
-    
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text=text)
-        print("Тестовое сообщение отправлено")
-    except Exception as e:
-        print(f"Ошибка отправки тестового сообщения: {e}")
+        print(f"Send error: {e}")
 
 async def main():
     if not TOKEN or not CHAT_ID:
-        raise ValueError(
-            "Укажи TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в переменных окружения"
-        )
+        raise ValueError("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
     
     bot = Bot(token=TOKEN)
     
-    # Отправляем тестовое сообщение
-    await send_test_message(bot)
+    # Простая проверка связи без лишних символов
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text="Bot started")
+        print("Test message sent")
+    except Exception as e:
+        print(f"Test send failed: {e}")
+        # Не выходим, продолжаем работу
     
     seen = load_seen()
-    print("Бот запущен:", datetime.now())
+    print("Bot started:", datetime.now())
     
     while True:
         try:
-            print(f"\n--- Проверка в {datetime.now().strftime('%H:%M:%S')} ---")
+            print(f"\n--- Check at {datetime.now().strftime('%H:%M:%S')} ---")
             ads = scrape_ads()
             
             new_count = 0
             for ad in ads:
                 if ad["id"] not in seen:
-                    print(f"ОТПРАВЛЯЮ: {ad['title']}")
+                    print(f"SENDING: {ad['title'][:50]}")
                     await send_message(bot, ad)
                     seen.add(ad["id"])
                     new_count += 1
-                    await asyncio.sleep(1)  # Пауза между отправками
+                    await asyncio.sleep(1)
             
             save_seen(seen)
-            print(f"Отправлено новых объявлений: {new_count}")
+            print(f"New ads sent: {new_count}")
             
         except Exception as e:
-            print(f"ОШИБКА в основном цикле: {e}")
+            print(f"ERROR: {e}")
         
         await asyncio.sleep(CHECK_INTERVAL)
 
