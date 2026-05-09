@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timedelta
 import re
 
@@ -22,6 +23,13 @@ URLS = [
 # Filters
 MAX_PRICE = 260000
 MIN_PRICE = 1
+
+ALLOWED_DISTRICTS = [
+    "Arabkir",
+    "Kanaker-Zeytun",
+    "Ajapnyak",
+    "Nor Nork",  # Добавлен для теста
+]
 
 SEEN_FILE = "seen_ads.json"
 
@@ -78,13 +86,23 @@ def is_recent(ad_element):
         return False
 
 def matches_filters(title, description, price_text):
-    """Только проверка цены"""
+    """Проверяет цену и район (без проверки на животных)"""
+    full_text = f"{title} {description}".lower()
+    
     price = parse_price(price_text)
     
     if not price:
         return False
     
     if price < MIN_PRICE or price > MAX_PRICE:
+        return False
+    
+    # Проверка районов
+    if not any(d.lower() in full_text for d in ALLOWED_DISTRICTS):
+        return False
+    
+    # Исключаем агенства (опционально, можно закомментировать)
+    if "agency" in full_text:
         return False
     
     return True
@@ -101,7 +119,13 @@ def clean_text(text):
 
 def scrape_ads():
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
     
     ads = []
@@ -109,13 +133,19 @@ def scrape_ads():
     for url in URLS:
         try:
             print(f"Проверяю: {url}")
+            time.sleep(2)  # Задержка между запросами
+            
             response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.text, "html.parser")
             items = soup.select("div.dl")
             
-            print(f"Найдено объявлений: {len(items)}")
+            # Альтернативный селектор, если div.dl не найден
+            if not items:
+                items = soup.select("div[data-id]")
+            
+            print(f"Найдено элементов: {len(items)}")
             
             for item in items:
                 try:
@@ -134,9 +164,11 @@ def scrape_ads():
                     if desc_el:
                         description = clean_text(desc_el.get_text(" ", strip=True))
                     
+                    # Фильтрация
                     if not matches_filters(title, description, price):
                         continue
                     
+                    # Проверка даты (только сегодня/вчера)
                     if not is_recent(item):
                         continue
                     
@@ -152,34 +184,33 @@ def scrape_ads():
                 except Exception as e:
                     print(f"Ошибка парсинга элемента: {e}")
                     
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             print(f"Ошибка при запросе {url}: {e}")
+            if "403" in str(e):
+                print("Ошибка 403 - доступ запрещен. Возможно, IP заблокирован.")
+        except Exception as e:
+            print(f"Общая ошибка при обработке {url}: {e}")
     
     return ads
 
 async def send_message(bot, ad):
-    """Отправляет сообщение о новом объявлении"""
-    text = (
-        f"НОВОЕ ОБЪЯВЛЕНИЕ\n\n"
-        f"{ad['title']}\n"
-        f"Цена: {ad['price']}\n\n"
-        f"{ad['description'][:150]}\n\n"
-        f"{ad['link']}"
-    )
+    """Отправляет сообщение о новом объявлении (упрощенная версия)"""
+    # Упрощаем текст, убираем все возможные спецсимволы
+    title = ad['title'][:100]  # Ограничиваем длину
+    price = ad['price']
+    link = ad['link']
+    
+    text = f"НОВОЕ ОБЪЯВЛЕНИЕ\n\n{title}\nЦена: {price}\n\n{link}"
     
     try:
         await bot.send_message(chat_id=CHAT_ID, text=text)
+        print(f"Сообщение отправлено: {title}")
     except Exception as e:
         print(f"Ошибка отправки: {e}")
 
 async def send_test_message(bot):
     """Отправляет тестовое сообщение при запуске"""
-    text = (
-        "БОТ ЗАПУЩЕН\n\n"
-        f"Цена: {MIN_PRICE} - {MAX_PRICE} AMD\n"
-        f"Показываю: сегодня и вчера\n"
-        f"Проверка каждые {CHECK_INTERVAL} секунд"
-    )
+    text = f"БОТ ЗАПУЩЕН\n\nЦена: {MIN_PRICE} - {MAX_PRICE} AMD\nРайоны: {', '.join(ALLOWED_DISTRICTS)}\nПроверка каждые {CHECK_INTERVAL} секунд"
     
     try:
         await bot.send_message(chat_id=CHAT_ID, text=text)
@@ -213,7 +244,7 @@ async def main():
                     await send_message(bot, ad)
                     seen.add(ad["id"])
                     new_count += 1
-                    await asyncio.sleep(1)  # Небольшая пауза между отправками
+                    await asyncio.sleep(1)  # Пауза между отправками
             
             save_seen(seen)
             print(f"Отправлено новых объявлений: {new_count}")
