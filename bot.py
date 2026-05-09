@@ -48,28 +48,22 @@ def parse_price(text):
 def extract_date(ad_element):
     """Пытается найти дату объявления"""
     try:
-        # Ищем элементы с датой
         date_elements = ad_element.select(".date, .time, .data, .date-time")
         
         for el in date_elements:
             date_text = el.get_text(" ", strip=True)
-            # Проверяем разные форматы дат
             if "сегодня" in date_text.lower() or "today" in date_text.lower():
                 return datetime.now().date()
             if "вчера" in date_text.lower() or "yesterday" in date_text.lower():
                 return datetime.now().date() - timedelta(days=1)
             
-            # Пробуем распарсить конкретную дату
-            # Формат: DD.MM.YYYY или DD/MM/YYYY
             date_match = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', date_text)
             if date_match:
                 day, month, year = date_match.groups()
                 return datetime(int(year), int(month), int(day)).date()
         
-        # Если дата не найдена, считаем объявление новым
         return datetime.now().date()
     except:
-        # По умолчанию считаем сегодняшним
         return datetime.now().date()
 
 def is_recent(ad_element):
@@ -81,7 +75,6 @@ def is_recent(ad_element):
         
         return ad_date == today or ad_date == yesterday
     except:
-        # Если не можем определить дату, пропускаем
         return False
 
 def matches_filters(title, description, price_text):
@@ -95,6 +88,16 @@ def matches_filters(title, description, price_text):
         return False
     
     return True
+
+def clean_text(text):
+    """Очищает текст от проблемных символов"""
+    if not text:
+        return ""
+    # Убираем лишние пробелы и переносы строк
+    text = text.replace('\n', ' ').replace('\r', ' ').strip()
+    # Убираем множественные пробелы
+    text = ' '.join(text.split())
+    return text
 
 def scrape_ads():
     headers = {
@@ -123,21 +126,18 @@ def scrape_ads():
                     if not title_el or not price_el:
                         continue
                     
-                    title = title_el.get_text(" ", strip=True)
+                    title = clean_text(title_el.get_text(" ", strip=True))
                     link = "https://www.list.am" + title_el.get("href")
-                    price = price_el.get_text(" ", strip=True)
+                    price = clean_text(price_el.get_text(" ", strip=True))
                     
                     description = ""
                     if desc_el:
-                        description = desc_el.get_text(" ", strip=True)
+                        description = clean_text(desc_el.get_text(" ", strip=True))
                     
-                    # Проверяем фильтры
                     if not matches_filters(title, description, price):
                         continue
                     
-                    # Проверяем, что объявление новое (сегодня/вчера)
                     if not is_recent(item):
-                        print(f"Пропущено (старое): {title}")
                         continue
                     
                     ads.append({
@@ -147,7 +147,7 @@ def scrape_ads():
                         "description": description,
                         "link": link,
                     })
-                    print(f"✅ НАЙДЕНО: {title} - {price}")
+                    print(f"НАЙДЕНО: {title} - {price}")
                     
                 except Exception as e:
                     print(f"Ошибка парсинга элемента: {e}")
@@ -158,25 +158,34 @@ def scrape_ads():
     return ads
 
 async def send_message(bot, ad):
+    """Отправляет сообщение о новом объявлении"""
     text = (
-        f"🏠 НОВОЕ ОБЪЯВЛЕНИЕ\n\n"
-        f"📌 {ad['title']}\n"
-        f"💰 {ad['price']}\n\n"
-        f"📝 {ad['description'][:200]}\n\n"
-        f"🔗 {ad['link']}"
+        f"НОВОЕ ОБЪЯВЛЕНИЕ\n\n"
+        f"{ad['title']}\n"
+        f"Цена: {ad['price']}\n\n"
+        f"{ad['description'][:150]}\n\n"
+        f"{ad['link']}"
     )
     
-    await bot.send_message(chat_id=CHAT_ID, text=text)
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text=text)
+    except Exception as e:
+        print(f"Ошибка отправки: {e}")
 
 async def send_test_message(bot):
     """Отправляет тестовое сообщение при запуске"""
-    await bot.send_message(
-        chat_id=CHAT_ID, 
-        text="🤖 БОТ ЗАПУЩЕН!\n\n"
-             f"💰 Цена: {MIN_PRICE} - {MAX_PRICE} AMD\n"
-             f"📅 Показываю: сегодня и вчера\n"
-             f"⏱ Проверка каждые {CHECK_INTERVAL} сек."
+    text = (
+        "БОТ ЗАПУЩЕН\n\n"
+        f"Цена: {MIN_PRICE} - {MAX_PRICE} AMD\n"
+        f"Показываю: сегодня и вчера\n"
+        f"Проверка каждые {CHECK_INTERVAL} секунд"
     )
+    
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text=text)
+        print("Тестовое сообщение отправлено")
+    except Exception as e:
+        print(f"Ошибка отправки тестового сообщения: {e}")
 
 async def main():
     if not TOKEN or not CHAT_ID:
@@ -197,17 +206,20 @@ async def main():
             print(f"\n--- Проверка в {datetime.now().strftime('%H:%M:%S')} ---")
             ads = scrape_ads()
             
+            new_count = 0
             for ad in ads:
                 if ad["id"] not in seen:
-                    print(f"📨 ОТПРАВЛЯЮ: {ad['title']}")
+                    print(f"ОТПРАВЛЯЮ: {ad['title']}")
                     await send_message(bot, ad)
                     seen.add(ad["id"])
+                    new_count += 1
+                    await asyncio.sleep(1)  # Небольшая пауза между отправками
             
             save_seen(seen)
-            print(f"Всего найдено новых: {len([a for a in ads if a['id'] not in seen])}")
+            print(f"Отправлено новых объявлений: {new_count}")
             
         except Exception as e:
-            print(f"ОШИБКА: {e}")
+            print(f"ОШИБКА в основном цикле: {e}")
         
         await asyncio.sleep(CHECK_INTERVAL)
 
